@@ -9,12 +9,18 @@ import (
 	"github.com/rabbitmq/amqp091-go"
 )
 
+// ServiceApp represents a service application.
 type ServiceApp struct {
-	Name          string
-	AMQPUrl       string
-	EventHandlers map[string]func(string, []byte)
+	Name          string                          // Name of the service application.
+	AMQPUrl       string                          // URL of the AMQP server.
+	EventHandlers map[string]func(string, []byte) // Map of event handlers.
 }
 
+// Start starts the service application.
+// It establishes a connection to RabbitMQ, declares an exchange and a queue,
+// binds the queue to the exchange for each configured event,
+// registers a consumer to receive messages from the queue,
+// and handles incoming messages by invoking the corresponding event handlers.
 func (app *ServiceApp) Start() {
 	log.Printf("Starting %s", app.Name)
 
@@ -77,18 +83,18 @@ func (app *ServiceApp) Start() {
 	// Start a goroutine to handle incoming messages for this consumer
 	go func() {
 		for msg := range msgs {
-			routingKey := msg.RoutingKey
-			eventHandlers := app.getEventHandlers(routingKey)
+			eventName := msg.RoutingKey
+			eventHandlers := app.getEventHandlers(eventName)
 
 			if len(eventHandlers) > 0 {
 				for _, eventHandler := range eventHandlers {
 					// Start a goroutine to handle the event
 					go func(handler func(string, []byte), body []byte) {
-						handler(routingKey, body)
+						handler(eventName, body)
 					}(eventHandler, msg.Body)
 				}
 			} else {
-				log.Printf("Unknown event: %s", routingKey)
+				log.Printf("Unknown event: %s", eventName)
 			}
 		}
 	}()
@@ -98,6 +104,11 @@ func (app *ServiceApp) Start() {
 	<-forever
 }
 
+// Subscribe adds a new event subscription to the ServiceApp.
+// It takes an event string and a handler function as parameters.
+// The event string represents the name of the event to subscribe to.
+// The handler function is a callback function that will be called when the event is triggered.
+// The handler function takes two parameters: the event name as a string and the event data as a byte slice.
 func (app *ServiceApp) Subscribe(event string, handler func(string, []byte)) {
 	if app.EventHandlers == nil {
 		app.EventHandlers = make(map[string]func(string, []byte))
@@ -106,6 +117,10 @@ func (app *ServiceApp) Subscribe(event string, handler func(string, []byte)) {
 	app.EventHandlers[event] = handler
 }
 
+// getEventHandlers returns a slice of event handlers that match the given eventName.
+// It searches for exact matches, wildcard matches with "*", and wildcard matches with "#".
+// The returned slice contains functions of type func(string, []byte).
+// If no matching event handlers are found, an empty slice is returned.
 func (app *ServiceApp) getEventHandlers(eventName string) []func(string, []byte) {
 	var handlers []func(string, []byte)
 	if handler, found := app.EventHandlers[eventName]; found {
@@ -114,27 +129,24 @@ func (app *ServiceApp) getEventHandlers(eventName string) []func(string, []byte)
 
 	// Check for event handlers with * wildcards that match the current "eventName"
 	for handlerEvent, handler := range app.EventHandlers {
+		// Check for event handlers with # wildcards that match the current "eventName"
+		if strings.Contains(handlerEvent, "#") {
+			if strings.HasPrefix(eventName, handlerEvent[:len(handlerEvent)-1]) {
+				handlers = append(handlers, handler)
+				continue
+			}
+		}
+
+		// Check for event handlers with * wildcards that match the current "eventName"
 		if strings.Contains(handlerEvent, "*") {
 			pattern := strings.ReplaceAll(handlerEvent, ".", "\\.")
 			pattern = strings.ReplaceAll(pattern, "*", ".*")
 			pattern = "^" + pattern + "$"
 
 			re, err := regexp.Compile(pattern)
-			if err != nil {
-				fmt.Printf("Error compiling regex pattern: %v\n", err)
-				continue
-			}
+			app.failOnError(err, fmt.Sprintf("Error compiling regex pattern: %v", err))
 
-			if re.MatchString(handlerEvent) {
-				handlers = append(handlers, handler)
-			}
-		}
-	}
-
-	// Check for event handlers with # wildcards that match the current "eventName"
-	for handlerEvent, handler := range app.EventHandlers {
-		if strings.Contains(handlerEvent, "#") {
-			if strings.HasPrefix(eventName, handlerEvent[:len(handlerEvent)-1]) {
+			if re.MatchString(eventName) {
 				handlers = append(handlers, handler)
 			}
 		}
